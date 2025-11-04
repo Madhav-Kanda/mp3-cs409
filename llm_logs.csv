@@ -1,0 +1,1288 @@
+# Complete assignment based on readme instructions
+_Exported on 11/4/2025 at 14:45:59 CST from Cursor (1.7.38)_
+
+---
+
+**User**
+
+Please help me complete this assingment by completing the things based on the instructions provided in the readme.md file
+
+---
+
+**Cursor**
+
+I'll scan the README and core files to identify all required tasks before implementing them. Then I'll create a small todo list and start with the first change.
+
+I'll add the `tasks` model and implement the `users` and `tasks` routes with query handling, validations, and two-way references. I'll also refactor `routes/index.js` to mount the router once and enable MongoDB connection in `server.js`.
+
+```javascript
+// Load required packages
+var mongoose = require('mongoose');
+
+// Define our task schema
+var TaskSchema = new mongoose.Schema({
+    name: { type: String, required: true },
+    description: { type: String, default: '' },
+    deadline: { type: Date, required: true },
+    completed: { type: Boolean, default: false },
+    assignedUser: { type: String, default: '' }, // stores User _id as string
+    assignedUserName: { type: String, default: 'unassigned' },
+    dateCreated: { type: Date, default: Date.now }
+});
+
+// Export the Mongoose model
+module.exports = mongoose.model('Task', TaskSchema);
+
+
+```
+
+```javascript
+// Load required packages
+var mongoose = require('mongoose');
+
+// Define our user schema
+var UserSchema = new mongoose.Schema({
+    name: { type: String, required: true },
+    email: { type: String, required: true, unique: true },
+    pendingTasks: { type: [String], default: [] }, // stores Task _id values as strings
+    dateCreated: { type: Date, default: Date.now }
+});
+
+// Export the Mongoose model
+module.exports = mongoose.model('User', UserSchema);
+
+```
+
+```javascript
+/*
+ * Connect all of your endpoints together here.
+ */
+module.exports = function (app, router) {
+    // Register route modules on the shared router
+    require('./home.js')(router);
+    require('./users.js')(router);
+    require('./tasks.js')(router);
+
+    // Mount the configured router under /api once
+    app.use('/api', router);
+};
+
+```
+
+```javascript
+var mongoose = require('mongoose');
+var User = require('../models/user');
+var Task = require('../models/task');
+
+module.exports = function (router) {
+
+    function parseJSONParam(res, value, name) {
+        if (value === undefined) return undefined;
+        try {
+            return JSON.parse(value);
+        } catch (e) {
+            res.status(400).json({ message: 'Invalid JSON for ' + name, data: {} });
+            return null;
+        }
+    }
+
+    function buildQueryParts(req, res) {
+        var where = parseJSONParam(res, req.query.where, 'where');
+        if (where === null) return null;
+        var sort = parseJSONParam(res, req.query.sort, 'sort');
+        if (sort === null) return null;
+        var selectRaw = req.query.select !== undefined ? req.query.select : req.query.filter; // support legacy 'filter'
+        var select = parseJSONParam(res, selectRaw, 'select');
+        if (selectRaw !== undefined && select === null) return null;
+        var skip = parseInt(req.query.skip || 0, 10);
+        var limit = req.query.limit !== undefined ? parseInt(req.query.limit, 10) : undefined;
+        var count = (req.query.count === 'true' || req.query.count === true);
+        return { where: where || {}, sort: sort || undefined, select: select || undefined, skip: skip || 0, limit: limit, count: count };
+    }
+
+    // GET /users
+    router.get('/users', async function (req, res) {
+        var parts = buildQueryParts(req, res);
+        if (parts === null) return; // error already sent
+
+        try {
+            if (parts.count) {
+                var c = await User.countDocuments(parts.where);
+                return res.status(200).json({ message: 'OK', data: c });
+            }
+
+            var q = User.find(parts.where);
+            if (parts.sort) q = q.sort(parts.sort);
+            if (parts.select) q = q.select(parts.select);
+            if (parts.skip) q = q.skip(parts.skip);
+            if (parts.limit !== undefined) q = q.limit(parts.limit);
+            var users = await q.exec();
+            return res.status(200).json({ message: 'OK', data: users });
+        } catch (err) {
+            return res.status(500).json({ message: 'Server error', data: {} });
+        }
+    });
+
+    // POST /users
+    router.post('/users', async function (req, res) {
+        try {
+            var name = req.body.name;
+            var email = req.body.email;
+            var pendingTasks = req.body.pendingTasks || [];
+
+            if (!name || !email) {
+                return res.status(400).json({ message: 'Name and email are required', data: {} });
+            }
+
+            var existing = await User.findOne({ email: email }).exec();
+            if (existing) {
+                return res.status(400).json({ message: 'Email already exists', data: {} });
+            }
+
+            var user = new User({ name: name, email: email, pendingTasks: Array.isArray(pendingTasks) ? pendingTasks : [] });
+            await user.save();
+
+            // Ensure two-way refs if pendingTasks were provided
+            if (Array.isArray(pendingTasks) && pendingTasks.length) {
+                await Task.updateMany(
+                    { _id: { $in: pendingTasks } },
+                    { $set: { assignedUser: String(user._id), assignedUserName: user.name, completed: false } }
+                ).exec();
+            }
+
+            return res.status(201).json({ message: 'User created', data: user });
+        } catch (err) {
+            return res.status(500).json({ message: 'Server error', data: {} });
+        }
+    });
+
+    // GET /users/:id
+    router.get('/users/:id', async function (req, res) {
+        var selectRaw = req.query.select !== undefined ? req.query.select : req.query.filter; // support legacy 'filter'
+        var select = undefined;
+        if (selectRaw !== undefined) {
+            select = parseJSONParam(res, selectRaw, 'select');
+            if (select === null) return;
+        }
+
+        try {
+            var q = User.findById(req.params.id);
+            if (select) q = q.select(select);
+            var user = await q.exec();
+            if (!user) return res.status(404).json({ message: 'User not found', data: {} });
+            return res.status(200).json({ message: 'OK', data: user });
+        } catch (err) {
+            return res.status(500).json({ message: 'Server error', data: {} });
+        }
+    });
+
+    // PUT /users/:id (replace entire user)
+    router.put('/users/:id', async function (req, res) {
+        try {
+            var name = req.body.name;
+            var email = req.body.email;
+            var pendingTasks = req.body.pendingTasks || [];
+
+            if (!name || !email) {
+                return res.status(400).json({ message: 'Name and email are required', data: {} });
+            }
+
+            var user = await User.findById(req.params.id).exec();
+            if (!user) return res.status(404).json({ message: 'User not found', data: {} });
+
+            var emailOwner = await User.findOne({ email: email }).exec();
+            if (emailOwner && String(emailOwner._id) !== String(user._id)) {
+                return res.status(400).json({ message: 'Email already exists', data: {} });
+            }
+
+            // Validate all task IDs exist if provided
+            if (pendingTasks && !Array.isArray(pendingTasks)) pendingTasks = [];
+            if (pendingTasks.length) {
+                var countExisting = await Task.countDocuments({ _id: { $in: pendingTasks } }).exec();
+                if (countExisting !== pendingTasks.length) {
+                    return res.status(400).json({ message: 'One or more pendingTasks IDs are invalid', data: {} });
+                }
+            }
+
+            // Previous tasks assigned to this user
+            var prevAssignedTasks = await Task.find({ assignedUser: String(user._id) }).select({ _id: 1 }).exec();
+            var prevTaskIds = prevAssignedTasks.map(function (t) { return String(t._id); });
+
+            // Update user fields
+            user.name = name;
+            user.email = email;
+            user.pendingTasks = pendingTasks;
+            await user.save();
+
+            // Unassign tasks removed from pendingTasks
+            var toUnassign = prevTaskIds.filter(function (id) { return pendingTasks.indexOf(id) === -1; });
+            if (toUnassign.length) {
+                await Task.updateMany(
+                    { _id: { $in: toUnassign }, assignedUser: String(user._id) },
+                    { $set: { assignedUser: '', assignedUserName: 'unassigned' } }
+                ).exec();
+            }
+
+            // Assign tasks now in pendingTasks
+            if (pendingTasks.length) {
+                await Task.updateMany(
+                    { _id: { $in: pendingTasks } },
+                    { $set: { assignedUser: String(user._id), assignedUserName: user.name, completed: false } }
+                ).exec();
+            }
+
+            return res.status(200).json({ message: 'User updated', data: user });
+        } catch (err) {
+            return res.status(500).json({ message: 'Server error', data: {} });
+        }
+    });
+
+    // DELETE /users/:id
+    router.delete('/users/:id', async function (req, res) {
+        try {
+            var user = await User.findById(req.params.id).exec();
+            if (!user) return res.status(404).json({ message: 'User not found', data: {} });
+
+            // Unassign this user's tasks
+            await Task.updateMany({ assignedUser: String(user._id) }, { $set: { assignedUser: '', assignedUserName: 'unassigned' } }).exec();
+
+            await user.remove();
+            return res.status(200).json({ message: 'User deleted', data: {} });
+        } catch (err) {
+            return res.status(500).json({ message: 'Server error', data: {} });
+        }
+    });
+
+    return router;
+};
+
+
+```
+
+```javascript
+var mongoose = require('mongoose');
+var Task = require('../models/task');
+var User = require('../models/user');
+
+module.exports = function (router) {
+
+    function parseJSONParam(res, value, name) {
+        if (value === undefined) return undefined;
+        try {
+            return JSON.parse(value);
+        } catch (e) {
+            res.status(400).json({ message: 'Invalid JSON for ' + name, data: {} });
+            return null;
+        }
+    }
+
+    function buildQueryParts(req, res) {
+        var where = parseJSONParam(res, req.query.where, 'where');
+        if (where === null) return null;
+        var sort = parseJSONParam(res, req.query.sort, 'sort');
+        if (sort === null) return null;
+        var selectRaw = req.query.select !== undefined ? req.query.select : req.query.filter; // support legacy 'filter'
+        var select = parseJSONParam(res, selectRaw, 'select');
+        if (selectRaw !== undefined && select === null) return null;
+        var skip = parseInt(req.query.skip || 0, 10);
+        var limit = req.query.limit !== undefined ? parseInt(req.query.limit, 10) : 100; // default 100
+        var count = (req.query.count === 'true' || req.query.count === true);
+        return { where: where || {}, sort: sort || undefined, select: select || undefined, skip: skip || 0, limit: limit, count: count };
+    }
+
+    // GET /tasks
+    router.get('/tasks', async function (req, res) {
+        var parts = buildQueryParts(req, res);
+        if (parts === null) return;
+
+        try {
+            if (parts.count) {
+                var c = await Task.countDocuments(parts.where);
+                return res.status(200).json({ message: 'OK', data: c });
+            }
+
+            var q = Task.find(parts.where);
+            if (parts.sort) q = q.sort(parts.sort);
+            if (parts.select) q = q.select(parts.select);
+            if (parts.skip) q = q.skip(parts.skip);
+            if (parts.limit !== undefined) q = q.limit(parts.limit);
+            var tasks = await q.exec();
+            return res.status(200).json({ message: 'OK', data: tasks });
+        } catch (err) {
+            return res.status(500).json({ message: 'Server error', data: {} });
+        }
+    });
+
+    // POST /tasks
+    router.post('/tasks', async function (req, res) {
+        try {
+            var name = req.body.name;
+            var description = req.body.description || '';
+            var deadlineRaw = req.body.deadline;
+            var completed = String(req.body.completed).toLowerCase() === 'true' || req.body.completed === true;
+            var assignedUser = req.body.assignedUser || '';
+
+            if (!name || !deadlineRaw) {
+                return res.status(400).json({ message: 'Name and deadline are required', data: {} });
+            }
+
+            var deadlineDate;
+            if (typeof deadlineRaw === 'string' || typeof deadlineRaw === 'number') {
+                var ms = parseInt(deadlineRaw, 10);
+                if (!isNaN(ms)) {
+                    deadlineDate = new Date(ms);
+                } else {
+                    deadlineDate = new Date(deadlineRaw);
+                }
+            } else if (deadlineRaw instanceof Date) {
+                deadlineDate = deadlineRaw;
+            }
+            if (!deadlineDate || isNaN(deadlineDate.getTime())) {
+                return res.status(400).json({ message: 'Invalid deadline', data: {} });
+            }
+
+            var assignedUserName = 'unassigned';
+            if (assignedUser) {
+                var user = await User.findById(assignedUser).exec();
+                if (!user) return res.status(400).json({ message: 'Assigned user not found', data: {} });
+                assignedUserName = user.name;
+            }
+
+            var task = new Task({
+                name: name,
+                description: description,
+                deadline: deadlineDate,
+                completed: completed,
+                assignedUser: assignedUser,
+                assignedUserName: assignedUser ? assignedUserName : 'unassigned'
+            });
+            await task.save();
+
+            if (assignedUser && !completed) {
+                await User.updateOne(
+                    { _id: assignedUser },
+                    { $addToSet: { pendingTasks: String(task._id) } }
+                ).exec();
+            }
+
+            return res.status(201).json({ message: 'Task created', data: task });
+        } catch (err) {
+            return res.status(500).json({ message: 'Server error', data: {} });
+        }
+    });
+
+    // GET /tasks/:id
+    router.get('/tasks/:id', async function (req, res) {
+        var selectRaw = req.query.select !== undefined ? req.query.select : req.query.filter; // support legacy 'filter'
+        var select = undefined;
+        if (selectRaw !== undefined) {
+            select = parseJSONParam(res, selectRaw, 'select');
+            if (select === null) return;
+        }
+
+        try {
+            var q = Task.findById(req.params.id);
+            if (select) q = q.select(select);
+            var task = await q.exec();
+            if (!task) return res.status(404).json({ message: 'Task not found', data: {} });
+            return res.status(200).json({ message: 'OK', data: task });
+        } catch (err) {
+            return res.status(500).json({ message: 'Server error', data: {} });
+        }
+    });
+
+    // PUT /tasks/:id (replace entire task)
+    router.put('/tasks/:id', async function (req, res) {
+        try {
+            var name = req.body.name;
+            var description = req.body.description || '';
+            var deadlineRaw = req.body.deadline;
+            var completed = String(req.body.completed).toLowerCase() === 'true' || req.body.completed === true;
+            var assignedUser = req.body.assignedUser || '';
+
+            if (!name || !deadlineRaw) {
+                return res.status(400).json({ message: 'Name and deadline are required', data: {} });
+            }
+
+            var task = await Task.findById(req.params.id).exec();
+            if (!task) return res.status(404).json({ message: 'Task not found', data: {} });
+
+            var prevAssignedUser = task.assignedUser;
+            var prevCompleted = task.completed;
+
+            var deadlineDate;
+            if (typeof deadlineRaw === 'string' || typeof deadlineRaw === 'number') {
+                var ms = parseInt(deadlineRaw, 10);
+                if (!isNaN(ms)) {
+                    deadlineDate = new Date(ms);
+                } else {
+                    deadlineDate = new Date(deadlineRaw);
+                }
+            } else if (deadlineRaw instanceof Date) {
+                deadlineDate = deadlineRaw;
+            }
+            if (!deadlineDate || isNaN(deadlineDate.getTime())) {
+                return res.status(400).json({ message: 'Invalid deadline', data: {} });
+            }
+
+            var assignedUserName = 'unassigned';
+            if (assignedUser) {
+                var user = await User.findById(assignedUser).exec();
+                if (!user) return res.status(400).json({ message: 'Assigned user not found', data: {} });
+                assignedUserName = user.name;
+            }
+
+            task.name = name;
+            task.description = description;
+            task.deadline = deadlineDate;
+            task.completed = completed;
+            task.assignedUser = assignedUser;
+            task.assignedUserName = assignedUser ? assignedUserName : 'unassigned';
+            await task.save();
+
+            // Two-way updates
+            var taskIdStr = String(task._id);
+            if (prevAssignedUser && (prevAssignedUser !== assignedUser || (!prevCompleted && completed))) {
+                await User.updateOne(
+                    { _id: prevAssignedUser },
+                    { $pull: { pendingTasks: taskIdStr } }
+                ).exec();
+            }
+            if (assignedUser && !completed) {
+                await User.updateOne(
+                    { _id: assignedUser },
+                    { $addToSet: { pendingTasks: taskIdStr } }
+                ).exec();
+            }
+
+            return res.status(200).json({ message: 'Task updated', data: task });
+        } catch (err) {
+            return res.status(500).json({ message: 'Server error', data: {} });
+        }
+    });
+
+    // DELETE /tasks/:id
+    router.delete('/tasks/:id', async function (req, res) {
+        try {
+            var task = await Task.findById(req.params.id).exec();
+            if (!task) return res.status(404).json({ message: 'Task not found', data: {} });
+
+            if (task.assignedUser) {
+                await User.updateOne(
+                    { _id: task.assignedUser },
+                    { $pull: { pendingTasks: String(task._id) } }
+                ).exec();
+            }
+
+            await task.remove();
+            return res.status(200).json({ message: 'Task deleted', data: {} });
+        } catch (err) {
+            return res.status(500).json({ message: 'Server error', data: {} });
+        }
+    });
+
+    return router;
+};
+
+
+```
+
+```javascript
+// Get the packages we need
+var express = require('express'),
+    router = express.Router(),
+    mongoose = require('mongoose'),
+    bodyParser = require('body-parser');
+
+// Read .env file
+require('dotenv').config();
+
+// Create our Express application
+var app = express();
+
+// Use environment defined port or 3000
+var port = process.env.PORT || 3000;
+
+// Connect to MongoDB Atlas if URI provided
+if (process.env.MONGODB_URI) {
+    mongoose.connect(process.env.MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true });
+    mongoose.connection.on('error', function () {
+        console.log('MongoDB connection error');
+    });
+    mongoose.connection.once('open', function () {
+        console.log('Connected to MongoDB');
+    });
+} else {
+    console.log('MONGODB_URI not set. Set it in .env to enable database.');
+}
+
+// Allow CORS so that backend and frontend could be put on different servers
+var allowCrossDomain = function (req, res, next) {
+    res.header("Access-Control-Allow-Origin", "*");
+    res.header("Access-Control-Allow-Headers", "X-Requested-With, X-HTTP-Method-Override, Content-Type, Accept");
+    res.header("Access-Control-Allow-Methods", "POST, GET, PUT, DELETE, OPTIONS");
+    next();
+};
+app.use(allowCrossDomain);
+
+// Use the body-parser package in our application
+app.use(bodyParser.urlencoded({
+    extended: true
+}));
+app.use(bodyParser.json());
+
+// Use routes as a module (see index.js)
+require('./routes')(app, router);
+
+// Start the server
+app.listen(port);
+console.log('Server running on port ' + port);
+
+```
+
+I scanned the README and core files to identify all required endpoints, query features, and data model rules, then implemented them across models and routes.
+
+What I changed:
+- Implemented full models
+  - Added `models/task.js` with fields: `name`, `description`, `deadline`, `completed`, `assignedUser`, `assignedUserName`, `dateCreated`.
+  - Expanded `models/user.js` with fields: `name`, `email` (unique), `pendingTasks`, `dateCreated`.
+
+- Implemented API routes
+  - `routes/users.js`: GET/POST/GET :id/PUT/DELETE with validation, `where/sort/select|filter/skip/limit/count`, and two-way updates.
+  - `routes/tasks.js`: GET/POST/GET :id/PUT/DELETE with validation, `where/sort/select|filter/skip/limit/count`, default limit=100 for tasks, and two-way updates.
+  - Backwards compatibility: supports both `select` and `filter` projection query params (scripts use `filter`).
+  - Two-way consistency:
+    - Task create/update: sync `User.pendingTasks` based on `assignedUser` and `completed`.
+    - User update: sync `Task.assignedUser`/`assignedUserName` and unassign dropped tasks.
+    - Task/User delete: clean up references.
+
+- Routing and server
+  - Refactored `routes/index.js` to register `home`, `users`, and `tasks` on a shared router and mount once at `/api`.
+  - Enabled MongoDB connection in `server.js` when `MONGODB_URI` is set; logs helpful messages.
+
+How to run:
+- Create a `.env` in `cs409-mp3/` with:
+  - `MONGODB_URI=your_atlas_connection_string`
+  - `PORT=3000` (optional)
+- Install and start:
+  - `npm install`
+  - `npm start`
+- Example endpoints:
+  - `GET /api/users?where={"name":{"$regex":"^a"}}&sort={"name":1}&skip=0&limit=10`
+  - `GET /api/tasks?count=true`
+  - `POST /api/users` (form-encoded) with `name`, `email`
+  - `POST /api/tasks` (form-encoded) with `name`, `deadline` (ms or ISO), optionally `assignedUser`, `completed`
+
+Notes:
+- Responses follow the required `{ message, data }` shape with appropriate status codes.
+- `dbFill.py` and `dbClean.py` should now work against `http://localhost:3000/api` (or your chosen port).
+- Default tasks GET limit is 100 unless you specify `limit`.
+
+Completed
+- Create Task model with required schema
+- Expand User model to match spec
+- Implement /api/users endpoints with validation
+- Implement /api/tasks endpoints with validation
+- Support where/sort/select|filter/skip/limit/count query params
+- Maintain two-way references between Users and Tasks
+- Refactor routing to mount once under /api
+- Enable MongoDB connection via MONGODB_URI
+
+- Key changes: added `routes/users.js`, `routes/tasks.js`, `models/task.js`; expanded `models/user.js`; refactored `routes/index.js`; enabled MongoDB connection in `server.js`.
+
+---
+
+**User**
+
+how can I test this implementation? Please tell me based on how we have been asked to do in this assignment
+
+---
+
+**Cursor**
+
+### What to do to test (per the README)
+
+- 1) Setup
+  - Create `cs409-mp3/.env` with:
+    - `MONGODB_URI=<your MongoDB Atlas connection string>`
+    - `PORT=3000` (optional)
+  - In Atlas, enable “Allow access from anywhere” on the IP allowlist.
+
+- 2) Install and run
+  - In `cs409-mp3/`:
+```bash
+npm install
+npm start
+```
+  - Confirm server is up: `GET http://localhost:3000/api/`
+
+- 3) Populate DB using the provided script
+```bash
+cd /Users/madhav/Desktop/UIUC/409/mp3/cs409-mp3/database_scripts
+python3 dbFill.py -u "localhost" -p 3000 -n 20 -t 100
+```
+  - This uses form-encoded bodies, which the server supports.
+
+- 4) Quick count checks (required query params)
+```bash
+# Users count
+curl 'http://localhost:3000/api/users?count=true'
+
+# Tasks count
+curl 'http://localhost:3000/api/tasks?count=true'
+```
+
+- 5) Query parameter tests (where/sort/select|filter/skip/limit)
+```bash
+# All users
+curl 'http://localhost:3000/api/users'
+
+# Filter completed tasks
+curl 'http://localhost:3000/api/tasks?where={"completed":true}'
+
+# Sort users by name ascending
+curl 'http://localhost:3000/api/users?sort={"name":1}'
+
+# Projection (use select or filter). README scripts use filter.
+curl 'http://localhost:3000/api/users?select={"_id":0}'
+curl 'http://localhost:3000/api/users?filter={"_id":1}'
+
+# Pagination on tasks (default limit should be 100)
+curl 'http://localhost:3000/api/tasks?skip=60&limit=20'
+```
+
+- 6) CRUD and validation checks
+```bash
+# Create user (201)
+curl -X POST -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d 'name=Alice Doe&email=alice@example.com' \
+  'http://localhost:3000/api/users'
+
+# Duplicate email (400)
+curl -X POST -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d 'name=Alice 2&email=alice@example.com' \
+  'http://localhost:3000/api/users'
+
+# Create task assigned to user (201)
+USER_ID='<paste the created user _id>'
+DEADLINE_MS=$(( $(date +%s000) + 604800000 ))
+curl -X POST -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d "name=Sample Task&deadline=$DEADLINE_MS&assignedUser=$USER_ID&completed=false" \
+  'http://localhost:3000/api/tasks'
+
+# Get user by id (200)
+curl "http://localhost:3000/api/users/$USER_ID"
+
+# Replace user (PUT requires name+email, syncs pendingTasks two-way)
+curl -X PUT -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d "name=Alice Updated&email=alice.updated@example.com&pendingTasks=[]" \
+  "http://localhost:3000/api/users/$USER_ID"
+
+# Replace task (PUT requires name+deadline; updates user.pendingTasks two-way)
+TASK_ID='<paste task _id>'
+curl -X PUT -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d "name=Task Updated&deadline=$DEADLINE_MS&completed=true&assignedUser=$USER_ID" \
+  "http://localhost:3000/api/tasks/$TASK_ID"
+
+# Delete task (cleans up user's pendingTasks)
+curl -X DELETE "http://localhost:3000/api/tasks/$TASK_ID"
+
+# Delete user (unassigns that user's tasks)
+curl -X DELETE "http://localhost:3000/api/users/$USER_ID"
+```
+
+- 7) Two-way reference behaviors to verify
+  - Creating a task with `assignedUser` and `completed=false` adds task `_id` to that user’s `pendingTasks`.
+  - Changing a task to `completed=true` removes it from `pendingTasks`.
+  - PUT user with `pendingTasks=[ids]` sets `Task.assignedUser/assignedUserName` accordingly, unassigning removed tasks.
+  - Deleting a task removes it from the user’s `pendingTasks`.
+  - Deleting a user unassigns the user’s tasks.
+
+- 8) Error and status code checks
+  - Missing required fields: `POST /users` without `name` or `email` => 400.
+  - Duplicate email => 400.
+  - `POST /tasks` without `name` or `deadline` => 400.
+  - Invalid JSON in `where/sort/select` => 400.
+  - Unknown ids => 404.
+  - Success: 200/201; delete success returns 200 with empty `data`.
+
+- 9) Clean database when needed
+```bash
+cd /Users/madhav/Desktop/UIUC/409/mp3/cs409-mp3/database_scripts
+python3 dbClean.py -u "localhost" -p 3000
+```
+
+- 10) Postman (optional, as suggested)
+  - Use `x-www-form-urlencoded` for body to mirror the scripts.
+  - Try the sample queries from the README and verify results/limits/projections.
+
+Summary:
+- Start server with `.env` pointing to Atlas.
+- Use `dbFill.py` to populate 20 users/100 tasks.
+- Validate counts, query params, and CRUD via curl/Postman.
+- Verify two-way reference updates during PUT/DELETE.
+- Clean with `dbClean.py` when done.
+
+```shellscript
+npm install
+npm start
+```
+
+```shellscript
+cd /Users/madhav/Desktop/UIUC/409/mp3/cs409-mp3/database_scripts
+python3 dbFill.py -u "localhost" -p 3000 -n 20 -t 100
+```
+
+```shellscript
+# Users count
+curl 'http://localhost:3000/api/users?count=true'
+
+# Tasks count
+curl 'http://localhost:3000/api/tasks?count=true'
+```
+
+```shellscript
+# All users
+curl 'http://localhost:3000/api/users'
+
+# Filter completed tasks
+curl 'http://localhost:3000/api/tasks?where={"completed":true}'
+
+# Sort users by name ascending
+curl 'http://localhost:3000/api/users?sort={"name":1}'
+
+# Projection (use select or filter). README scripts use filter.
+curl 'http://localhost:3000/api/users?select={"_id":0}'
+curl 'http://localhost:3000/api/users?filter={"_id":1}'
+
+# Pagination on tasks (default limit should be 100)
+curl 'http://localhost:3000/api/tasks?skip=60&limit=20'
+```
+
+```shellscript
+# Create user (201)
+curl -X POST -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d 'name=Alice Doe&email=alice@example.com' \
+  'http://localhost:3000/api/users'
+
+# Duplicate email (400)
+curl -X POST -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d 'name=Alice 2&email=alice@example.com' \
+  'http://localhost:3000/api/users'
+
+# Create task assigned to user (201)
+USER_ID='<paste the created user _id>'
+DEADLINE_MS=$(( $(date +%s000) + 604800000 ))
+curl -X POST -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d "name=Sample Task&deadline=$DEADLINE_MS&assignedUser=$USER_ID&completed=false" \
+  'http://localhost:3000/api/tasks'
+
+# Get user by id (200)
+curl "http://localhost:3000/api/users/$USER_ID"
+
+# Replace user (PUT requires name+email, syncs pendingTasks two-way)
+curl -X PUT -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d "name=Alice Updated&email=alice.updated@example.com&pendingTasks=[]" \
+  "http://localhost:3000/api/users/$USER_ID"
+
+# Replace task (PUT requires name+deadline; updates user.pendingTasks two-way)
+TASK_ID='<paste task _id>'
+curl -X PUT -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d "name=Task Updated&deadline=$DEADLINE_MS&completed=true&assignedUser=$USER_ID" \
+  "http://localhost:3000/api/tasks/$TASK_ID"
+
+# Delete task (cleans up user's pendingTasks)
+curl -X DELETE "http://localhost:3000/api/tasks/$TASK_ID"
+
+# Delete user (unassigns that user's tasks)
+curl -X DELETE "http://localhost:3000/api/users/$USER_ID"
+```
+
+```shellscript
+cd /Users/madhav/Desktop/UIUC/409/mp3/cs409-mp3/database_scripts
+python3 dbClean.py -u "localhost" -p 3000
+```
+
+---
+
+**User**
+
+are we using express.js in this codebase?
+
+---
+
+**Cursor**
+
+Yes — this codebase uses Express.
+
+```1:5:/Users/madhav/Desktop/UIUC/409/mp3/cs409-mp3/server.js
+// Get the packages we need
+var express = require('express'),
+    router = express.Router(),
+    mongoose = require('mongoose'),
+    bodyParser = require('body-parser');
+```
+
+```25:31:/Users/madhav/Desktop/UIUC/409/mp3/cs409-mp3/package.json
+  "dependencies": {
+    "body-parser": "^1.17.2",
+    "dotenv": "^17.2.3",
+    "express": "^4.15.3",
+    "mongoose": "^5.4.18",
+    "nodemon": "^1.11.0"
+  }
+```
+
+```4:10:/Users/madhav/Desktop/UIUC/409/mp3/cs409-mp3/routes/index.js
+module.exports = function (app, router) {
+    // Register route modules on the shared router
+    require('./home.js')(router);
+    require('./users.js')(router);
+    require('./tasks.js')(router);
+
+    // Mount the configured router under /api once
+    app.use('/api', router);
+};
+```
+
+```1:6:/Users/madhav/Desktop/UIUC/409/mp3/cs409-mp3/routes/home.js
+module.exports = function (router) {
+
+    var homeRoute = router.route('/');
+
+    homeRoute.get(function (req, res) {
+```
+
+```javascript
+// Get the packages we need
+var express = require('express'),
+    router = express.Router(),
+    mongoose = require('mongoose'),
+    bodyParser = require('body-parser');
+```
+
+```json
+  "dependencies": {
+    "body-parser": "^1.17.2",
+    "dotenv": "^17.2.3",
+    "express": "^4.15.3",
+    "mongoose": "^5.4.18",
+    "nodemon": "^1.11.0"
+  }
+```
+
+```javascript
+module.exports = function (app, router) {
+    // Register route modules on the shared router
+    require('./home.js')(router);
+    require('./users.js')(router);
+    require('./tasks.js')(router);
+
+    // Mount the configured router under /api once
+    app.use('/api', router);
+};
+```
+
+```javascript
+module.exports = function (router) {
+
+    var homeRoute = router.route('/');
+
+    homeRoute.get(function (req, res) {
+```
+
+---
+
+**User**
+
+how to use the dbFill.py file here
+
+---
+
+**Cursor**
+
+### Use `dbFill.py` to populate your DB
+
+- Prerequisites
+  - Add `.env` in `cs409-mp3/` with `MONGODB_URI=<your Atlas URI>` and whitelist “Allow access from anywhere” in Atlas.
+  - Start the API:
+```bash
+cd /Users/madhav/Desktop/UIUC/409/mp3/cs409-mp3
+npm install
+npm start
+```
+
+- Run the filler script (run from its folder so it can read `tasks.txt`)
+```bash
+cd /Users/madhav/Desktop/UIUC/409/mp3/cs409-mp3/database_scripts
+python3 dbFill.py -u "localhost" -p 3000 -n 20 -t 100
+```
+- Flags
+  - `-u` base URL host (keep quotes; no `/api` or paths)
+  - `-p` port (use your server port, default 3000)
+  - `-n` number of users
+  - `-t` number of tasks
+
+- Verify
+```bash
+curl 'http://localhost:3000/api/users?count=true'
+curl 'http://localhost:3000/api/tasks?count=true'
+```
+
+- Clean and rerun if needed
+```bash
+cd /Users/madhav/Desktop/UIUC/409/mp3/cs409-mp3/database_scripts
+python3 dbClean.py -u "localhost" -p 3000
+```
+
+- Troubleshooting
+  - `tasks.txt` not found: ensure you’re in `database_scripts/` when running the script.
+  - Connection refused: confirm `npm start` is running and using the port you pass to the script.
+  - 500s: recheck `MONGODB_URI` is valid and whitelisted in Atlas.
+
+```shellscript
+cd /Users/madhav/Desktop/UIUC/409/mp3/cs409-mp3
+npm install
+npm start
+```
+
+```shellscript
+cd /Users/madhav/Desktop/UIUC/409/mp3/cs409-mp3/database_scripts
+python3 dbFill.py -u "localhost" -p 3000 -n 20 -t 100
+```
+
+```shellscript
+curl 'http://localhost:3000/api/users?count=true'
+curl 'http://localhost:3000/api/tasks?count=true'
+```
+
+```shellscript
+cd /Users/madhav/Desktop/UIUC/409/mp3/cs409-mp3/database_scripts
+python3 dbClean.py -u "localhost" -p 3000
+```
+
+---
+
+**User**
+
+Great, also in the .env file what do I need to fill in the TOKEN field, is there something mentioned about this in the Readme?
+
+---
+
+**Cursor**
+
+Short answer: You don’t need a TOKEN. It’s not mentioned in the README and isn’t required for grading. Just set MONGODB_URI (and optionally PORT).
+
+- What the README implies: use a MongoDB Atlas connection string in your `.env` and don’t commit it.
+```130:136:/Users/madhav/Desktop/UIUC/409/mp3/cs409-mp3/README.md
+  - Please DO NOT delete the `.gitignore` file from the project, you will lose 1% point
+  - DO NOT push your updated .env file to your repository (remember to uncomment .env in .gitignore), or you will lose 1% point
+  - We will check if you uncommented .env
+  - Check out [Postman](https://www.getpostman.com/postman) to your API
+  - Free MongoDB server - [MongoDB Atlas](https://www.mongodb.com/cloud/atlas)
+```
+
+- The server uses `MONGODB_URI`:
+```16:18:/Users/madhav/Desktop/UIUC/409/mp3/cs409-mp3/server.js
+// Connect to a MongoDB --> Uncomment this once you have a connection string!!
+//mongoose.connect(process.env.MONGODB_URI,  { useNewUrlParser: true });
+```
+
+- `TOKEN` is only used in the demo home route response and can be ignored:
+```5:8:/Users/madhav/Desktop/UIUC/409/mp3/cs409-mp3/routes/home.js
+homeRoute.get(function (req, res) {
+    var connectionString = process.env.TOKEN;
+    res.json({ message: 'My connection string is ' + connectionString });
+});
+```
+
+Use this `.env`:
+```bash
+MONGODB_URI=<your MongoDB Atlas connection string>
+PORT=3000
+# TOKEN is not needed; you can omit it
+```
+
+```plaintext
+  - Please DO NOT delete the `.gitignore` file from the project, you will lose 1% point
+  - DO NOT push your updated .env file to your repository (remember to uncomment .env in .gitignore), or you will lose 1% point
+  - We will check if you uncommented .env
+  - Check out [Postman](https://www.getpostman.com/postman) to your API
+  - Free MongoDB server - [MongoDB Atlas](https://www.mongodb.com/cloud/atlas)
+```
+
+```javascript
+// Connect to a MongoDB --> Uncomment this once you have a connection string!!
+//mongoose.connect(process.env.MONGODB_URI,  { useNewUrlParser: true });
+```
+
+```javascript
+homeRoute.get(function (req, res) {
+    var connectionString = process.env.TOKEN;
+    res.json({ message: 'My connection string is ' + connectionString });
+});
+```
+
+```shellscript
+MONGODB_URI=<your MongoDB Atlas connection string>
+PORT=3000
+# TOKEN is not needed; you can omit it
+```
+
+---
+
+**User**
+
+Please provide me relvant api queries that I can use with postman to evaluate the correctness of the implementation based on the instructions provided in the repository
+
+---
+
+**Cursor**
+
+### Postman-ready requests to evaluate correctness
+
+Tip: set an environment variable `baseUrl = http://localhost:3000/api` in Postman and use {{baseUrl}} below.
+
+- Sanity checks
+  - GET: `{{baseUrl}}/users` → 200, list
+  - GET: `{{baseUrl}}/tasks` → 200, list
+  - GET: `{{baseUrl}}/users?count=true` → 200, number
+  - GET: `{{baseUrl}}/tasks?count=true` → 200, number
+
+- Query parameter features (JSON-encoded values)
+  - GET: `{{baseUrl}}/tasks?where={"completed":true}` → only completed
+  - GET: `{{baseUrl}}/users?sort={"name":1}` → ascending by name
+  - GET: `{{baseUrl}}/users?select={"_id":0}` → hide `_id`
+  - GET: `{{baseUrl}}/users?filter={"_id":1}` → projection via legacy alias (scripts)
+  - GET: `{{baseUrl}}/tasks?skip=60&limit=20` → pagination
+  - GET: `{{baseUrl}}/users?sort={"name":1}&skip=60&limit=20` → combined
+  - GET by id with select: `{{baseUrl}}/users/{{USER_ID}}?select={"email":1,"name":1}`
+
+- Users CRUD and validation
+  - POST: `{{baseUrl}}/users`
+    - Body (x-www-form-urlencoded):
+      - name: Alice Doe
+      - email: alice@example.com
+    - Expect 201, `{ message: "User created", data: { ... } }`
+  - GET: `{{baseUrl}}/users/{{USER_ID}}` → 200, user details
+  - PUT (replace entire user): `{{baseUrl}}/users/{{USER_ID}}`
+    - Body (x-www-form-urlencoded):
+      - name: Alice Updated
+      - email: alice.updated@example.com
+      - pendingTasks: []  (you can also supply a JSON array of task ids)
+    - Expect 200; tasks referenced in `pendingTasks` get assigned to this user, dropped ones are unassigned
+  - DELETE: `{{baseUrl}}/users/{{USER_ID}}` → 200; all their tasks become unassigned
+
+- Tasks CRUD and two-way references
+  - POST: `{{baseUrl}}/tasks`
+    - Body (x-www-form-urlencoded):
+      - name: Sample Task
+      - description: Optional description
+      - deadline: 1730000000000  (ms since epoch or ISO string)
+      - assignedUser: {{USER_ID}}  (optional)
+      - completed: false
+    - Expect 201; if assignedUser and not completed, user’s `pendingTasks` includes this task id
+  - GET: `{{baseUrl}}/tasks/{{TASK_ID}}` → 200, task details
+  - PUT (replace entire task): `{{baseUrl}}/tasks/{{TASK_ID}}`
+    - Body (x-www-form-urlencoded):
+      - name: Sample Task Updated
+      - description: Updated description
+      - deadline: 1730500000000
+      - assignedUser: {{USER_ID}}  (or empty to unassign)
+      - completed: true
+    - Expect 200; if completed becomes true, it’s removed from user’s `pendingTasks`; if reassigned, pendingTasks updates accordingly
+  - DELETE: `{{baseUrl}}/tasks/{{TASK_ID}}` → 200; if it was pending on a user, it’s removed from their `pendingTasks`
+
+- Error behavior (required by README)
+  - Invalid JSON in params: `{{baseUrl}}/users?where={bad` → 400 with helpful message
+  - Missing fields on create:
+    - POST `{{baseUrl}}/users` with only `name` → 400
+    - POST `{{baseUrl}}/tasks` with only `name` → 400 (deadline required)
+  - Duplicate email:
+    - POST another `{{baseUrl}}/users` with `email=alice@example.com` → 400
+  - Not found:
+    - GET/PUT/DELETE `{{baseUrl}}/users/000000000000000000000000` → 404
+    - GET/PUT/DELETE `{{baseUrl}}/tasks/000000000000000000000000` → 404
+
+Notes
+- Use the Params tab for GETs with JSON values (Postman will handle URL encoding).
+- For POST/PUT bodies, set Body type to x-www-form-urlencoded (matches the provided scripts).
+- Default limit for tasks GET is 100 unless you supply `limit`.
+
+---
+
+**User**
+
+will the new entry that will come up get automatically sorted in the database?
+
+---
+
+**Cursor**
+
+Short answer: No. MongoDB doesn’t auto-sort; our API returns documents unsorted unless you pass a sort.
+
+- To get consistent order, include a sort param on reads:
+  - Latest tasks first: `GET /api/tasks?sort={"dateCreated":-1}`
+  - Oldest tasks first: `GET /api/tasks?sort={"dateCreated":1}`
+  - Users by name: `GET /api/users?sort={"name":1}`
+
+If you want a default sort (e.g., tasks by `dateCreated` desc) without passing a param, I can add that to the GET handlers.
+
+---
+
+**User**
+
+I have a doubt, I entered the following query and got the following response, shouldn't "Sample Task Updated", come later down the line? The query and the response is as follows:
+
+query: http://localhost:3000/api/users?sort={"name":1}
+
+Response:
+
+{
+    "message": "OK",
+    "data": [
+        {
+            "pendingTasks": [],
+            "_id": "690a59024776c5e3f750a1fe",
+            "name": "Sample Task Updated",
+            "email": "alice@example.com",
+            "dateCreated": "2025-11-04T19:50:26.275Z",
+            "__v": 0
+        },
+        {
+            "pendingTasks": [
+                "690a541f4776c5e3f750a05d"
+            ],
+            "_id": "690a541e4776c5e3f750a03e",
+            "name": "alan richardson",
+            "email": "alan@richardson.com",
+            "dateCreated": "2025-11-04T19:29:34.541Z",
+            "__v": 0
+        },
+        {
+            "pendingTasks": [
+                "690a54214776c5e3f750a0ac",
+                "690a54214776c5e3f750a0c0",
+                "690a54254776c5e3f750a143",
+                "690a54264776c5e3f750a176"
+            ],
+            "_id": "690a541d4776c5e3f750a01a",
+            "name": "billy peterson",
+            "email": "billy@peterson.com",
+            "dateCreated": "2025-11-04T19:29:33.738Z",
+            "__v": 0
+        },
+        {
+            "pendingTasks": [
+                "690a541f4776c5e3f750a06a"
+            ],
+            "_id": "690a541d4776c5e3f750a01d",
+            "name": "brandon hughes",
+            "email": "brandon@hughes.com",
+            "dateCreated": "2025-11-04T19:29:33.817Z",
+            "__v": 0
+        },
+        {
+            "pendingTasks": [
+                "690a54254776c5e3f750a159"
+            ],
+            "_id": "690a541e4776c5e3f750a044",
+            "name": "charles lewis",
+            "email": "charles@lewis.com",
+            "dateCreated": "2025-11-04T19:29:34.678Z",
+            "__v": 0
+        },
+        {
+            "pendingTasks": [
+                "690a54214776c5e3f750a0b6",
+                "690a54224776c5e3f750a0e6"
+            ],
+            "_id": "690a541e4776c5e3f750a026",
+            "name": "chris gonzales",
+            "email": "chris@gonzales.com",
+            "dateCreated": "2025-11-04T19:29:34.027Z",
+            "__v": 0
+        },
+        {
+            "pendingTasks": [],
+            "_id": "690a541e4776c5e3f750a02c",
+            "name": "donald bennett",
+            "email": "donald@bennett.com",
+            "dateCreated": "2025-11-04T19:29:34.157Z",
+            "__v": 0
+        },
+        {
+            "pendingTasks": [
+                "690a54204776c5e3f750a097",
+                "690a54224776c5e3f750a0ca",
+                "690a54234776c5e3f750a103"
+            ],
+            "_id": "690a541d4776c5e3f750a023",
+            "name": "donald clark",
+            "email": "donald@clark.com",
+            "dateCreated": "2025-11-04T19:29:33.957Z",
+            "__v": 0
+        },
+        {
+            "pendingTasks": [
+                "690a54274776c5e3f750a196"
+            ],
+            "_id": "690a541e4776c5e3f750a04a",
+            "name": "eric gonzalez",
+            "email": "eric@gonzalez.com",
+            "dateCreated": "2025-11-04T19:29:34.811Z",
+            "__v": 0
+        },
+        {
+            "pendingTasks": [],
+            "_id": "690a541d4776c5e3f750a017",
+            "name": "ernest coleman",
+            "email": "ernest@coleman.com",
+            "dateCreated": "2025-11-04T19:29:33.674Z",
+            "__v": 0
+        },
+        {
+            "pendingTasks": [
+                "690a541e4776c5e3f750a051"
+            ],
+            "_id": "690a541e4776c5e3f750a029",
+            "name": "eugene jones",
+            "email": "eugene@jones.com",
+            "dateCreated": "2025-11-04T19:29:34.096Z",
+            "__v": 0
+        },
+        {
+            "pendingTasks": [
+                "690a54204776c5e3f750a082"
+            ],
+            "_id": "690a541d4776c5e3f750a020",
+            "name": "frank baker",
+            "email": "frank@baker.com",
+            "dateCreated": "2025-11-04T19:29:33.886Z",
+            "__v": 0
+        },
+
+---
+
+**Cursor**
+
+Short answer: It’s sorting correctly. MongoDB’s default sort is case-sensitive, so capitalized strings (e.g., “Sample Task Updated”) come before lowercase ones (“alan ...”).
+
+If you want case-insensitive alphabetical order:
+- Option 1 (recommended): add collation to the GET sort queries.
+  - In `routes/users.js` and `routes/tasks.js`, when you apply sort, also add collation:
+```javascript
+if (parts.sort) {
+    q = q.sort(parts.sort).collation({ locale: 'en', strength: 2 });
+}
+```
+- Option 2: normalize names when storing and sort on a lowercased field, but that’s more invasive.
+
+Then `GET /api/users?sort={"name":1}` will place “Sample Task Updated” after the lowercase names.
+
+```javascript
+if (parts.sort) {
+    q = q.sort(parts.sort).collation({ locale: 'en', strength: 2 });
+}
+```
+
