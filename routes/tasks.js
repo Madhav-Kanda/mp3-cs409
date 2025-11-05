@@ -213,7 +213,7 @@ module.exports = function (router) {
             }
 
             await task.remove();
-            return res.status(200).json({ message: 'Task deleted', data: {} });
+            return res.status(204).send();
         } catch (err) {
             return res.status(500).json({ message: 'Server error', data: {} });
         }
